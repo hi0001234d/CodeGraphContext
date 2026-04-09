@@ -1,0 +1,173 @@
+{
+  "metadata": {
+    "benchmark_date": "2026-04-09T14:34:45.441229+00:00",
+    "cgc_version": "Traceback (most recent call last):\n  File \"/home/pc1/.local/bin/cgc\", line 5, in <module>\n    from codegraphcontext.cli.main import app\nModuleNotFoundError: No module named 'codegraphcontext'",
+    "cgc_commit": "unknown",
+    "cgc_commit_date": "unknown",
+    "database": "K\u00f9zuDB (shared single instance)",
+    "system": {
+      "os": "Linux-6.17.0-20-generic-x86_64-with-glibc2.39",
+      "cpu": "Intel(R) Core(TM) i5-9600K CPU @ 3.70GHz",
+      "cpu_cores": 6,
+      "ram": "31Gi",
+      "python": "3.12.3",
+      "disk_type": "Unknown"
+    }
+  },
+  "repos": {
+    "click": {
+      "github": "pallets/click",
+      "tier": "Small",
+      "tier_emoji": "\ud83d\udfe2",
+      "test_function": "make_str",
+      "test_class": "CliRunner",
+      "commit": "04ef3a6f473deb2499721a8d11f92a7d2c0912f2",
+      "commit_date": "2026-04-03 15:55:22 -0700",
+      "short_commit": "04ef3a6f473d",
+      "total_files": 148,
+      "py_files": 63,
+      "index_time_ms": 90,
+      "index_success": false,
+      "stats": {
+        "files": 0,
+        "functions": 0,
+        "classes": 0,
+        "modules": 0
+      },
+      "stats_time_ms": 90,
+      "total_nodes": "N/A",
+      "total_edges": "N/A",
+      "analyze": {
+        "calls": {
+          "time_ms": 89,
+          "success": false
+        },
+        "callers": {
+          "time_ms": 92,
+          "success": false
+        },
+        "deps": {
+          "time_ms": 88,
+          "success": false
+        },
+        "tree": {
+          "time_ms": 93,
+          "success": false
+        },
+        "complexity": {
+          "time_ms": 89,
+          "success": false
+        },
+        "dead-code": {
+          "time_ms": 96,
+          "success": false
+        }
+      }
+    },
+    "flask": {
+      "github": "pallets/flask",
+      "tier": "Medium",
+      "tier_emoji": "\ud83d\udfe1",
+      "test_function": "make_response",
+      "test_class": "Flask",
+      "commit": "2ac89889f4cc330eabd50f295dcef02828522c69",
+      "commit_date": "2026-04-08 21:04:03 -0700",
+      "short_commit": "2ac89889f4cc",
+      "total_files": 237,
+      "py_files": 83,
+      "index_time_ms": 97,
+      "index_success": false,
+      "stats": {
+        "files": 0,
+        "functions": 0,
+        "classes": 0,
+        "modules": 0
+      },
+      "stats_time_ms": 91,
+      "total_nodes": "N/A",
+      "total_edges": "N/A",
+      "analyze": {
+        "calls": {
+          "time_ms": 88,
+          "success": false
+        },
+        "callers": {
+          "time_ms": 89,
+          "success": false
+        },
+        "deps": {
+          "time_ms": 89,
+          "success": false
+        },
+        "tree": {
+          "time_ms": 89,
+          "success": false
+        },
+        "complexity": {
+          "time_ms": 90,
+          "success": false
+        },
+        "dead-code": {
+          "time_ms": 91,
+          "success": false
+        }
+      }
+    },
+    "fastapi": {
+      "github": "tiangolo/fastapi",
+      "tier": "Large",
+      "tier_emoji": "\ud83d\udd34",
+      "test_function": "get",
+      "test_class": "FastAPI",
+      "commit": "eba8942c81dbf990d25fbae34e6601bdbc21e74b",
+      "commit_date": "2026-04-07 09:50:22 +0000",
+      "short_commit": "eba8942c81db",
+      "total_files": 2986,
+      "py_files": 1121,
+      "index_time_ms": 92,
+      "index_success": false,
+      "stats": {
+        "files": 0,
+        "functions": 0,
+        "classes": 0,
+        "modules": 0
+      },
+      "stats_time_ms": 90,
+      "total_nodes": "N/A",
+      "total_edges": "N/A",
+      "analyze": {
+        "calls": {
+          "time_ms": 92,
+          "success": false
+        },
+        "callers": {
+          "time_ms": 89,
+          "success": false
+        },
+        "deps": {
+          "time_ms": 92,
+          "success": false
+        },
+        "tree": {
+          "time_ms": 91,
+          "success": false
+        },
+        "complexity": {
+          "time_ms": 91,
+          "success": false
+        },
+        "dead-code": {
+          "time_ms": 89,
+          "success": false
+        }
+      }
+    }
+  },
+  "overall_stats": {
+    "files": 0,
+    "functions": 0,
+    "classes": 0,
+    "modules": 0
+  },
+  "kuzudb_disk_size": "N/A"
+}
