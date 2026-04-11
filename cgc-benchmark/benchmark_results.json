@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "benchmark_date": "2026-04-10T10:14:13.147338+00:00",
-    "cgc_version": "CodeGraphContext 0.3.1",
-    "cgc_commit": "649f045fea5c2e7a22e3eb220d984135623f2ba8",
-    "cgc_commit_date": "2026-04-09 20:11:54 +0530",
-    "database": "FalkorDB (shared single instance)",
+    "benchmark_date": "2026-04-11T14:33:26.064464+00:00",
+    "cgc_version": "0.4.2",
+    "cgc_commit": "db5ba37937be9a336a78e35e588125971b598e56",
+    "cgc_commit_date": "2026-04-11 18:29:33 +0530",
+    "database": "K\u00f9zuDB (shared single instance)",
     "system": {
       "os": "Linux-6.17.0-20-generic-x86_64-with-glibc2.39",
       "cpu": "Intel(R) Core(TM) i5-9600K CPU @ 3.70GHz",
@@ -26,40 +26,42 @@
       "short_commit": "04ef3a6f473d",
       "total_files": 148,
       "py_files": 63,
-      "index_time_ms": 33682,
+      "index_time_ms": 8427,
       "index_success": true,
+      "crash_reason": null,
       "stats": {
         "files": 63,
-        "functions": 2594,
+        "functions": 2710,
         "classes": 142,
         "modules": 241
       },
-      "stats_time_ms": 923,
-      "total_nodes": "4498",
-      "total_edges": "29613",
+      "stats_time_ms": 936,
+      "stats_source": "cgc_stats",
+      "total_nodes": "4535",
+      "total_edges": "13189",
       "analyze": {
         "calls": {
-          "time_ms": 893,
+          "time_ms": 771,
           "success": true
         },
         "callers": {
-          "time_ms": 904,
+          "time_ms": 776,
           "success": true
         },
         "deps": {
-          "time_ms": 898,
-          "success": true
+          "time_ms": 1039,
+          "success": false
         },
         "tree": {
-          "time_ms": 913,
+          "time_ms": 789,
           "success": true
         },
         "complexity": {
-          "time_ms": 914,
+          "time_ms": 755,
           "success": true
         },
         "dead-code": {
-          "time_ms": 1011,
+          "time_ms": 838,
           "success": true
         }
       }
@@ -75,40 +77,42 @@
       "short_commit": "2ac89889f4cc",
       "total_files": 237,
       "py_files": 83,
-      "index_time_ms": 24998,
+      "index_time_ms": 10443,
       "index_success": true,
+      "crash_reason": null,
       "stats": {
         "files": 83,
         "functions": 3047,
         "classes": 161,
         "modules": 260
       },
-      "stats_time_ms": 917,
-      "total_nodes": "4181",
-      "total_edges": "14679",
+      "stats_time_ms": 835,
+      "stats_source": "cgc_stats",
+      "total_nodes": "4331",
+      "total_edges": "10701",
       "analyze": {
         "calls": {
-          "time_ms": 972,
+          "time_ms": 780,
           "success": true
         },
         "callers": {
-          "time_ms": 926,
+          "time_ms": 775,
           "success": true
         },
         "deps": {
-          "time_ms": 910,
-          "success": true
+          "time_ms": 1027,
+          "success": false
         },
         "tree": {
-          "time_ms": 923,
+          "time_ms": 796,
           "success": true
         },
         "complexity": {
-          "time_ms": 895,
+          "time_ms": 771,
           "success": true
         },
         "dead-code": {
-          "time_ms": 1009,
+          "time_ms": 848,
           "success": true
         }
       }
@@ -124,40 +128,42 @@
       "short_commit": "eba8942c81db",
       "total_files": 2986,
       "py_files": 1121,
-      "index_time_ms": 80144,
+      "index_time_ms": 91265,
       "index_success": true,
+      "crash_reason": null,
       "stats": {
         "files": 1125,
-        "functions": 5651,
-        "classes": 689,
-        "modules": 384
+        "functions": 4534,
+        "classes": 688,
+        "modules": 0
       },
-      "stats_time_ms": 1001,
-      "total_nodes": "14506",
-      "total_edges": "28773",
+      "stats_time_ms": 131676,
+      "stats_source": "cypher_fallback",
+      "total_nodes": "14667",
+      "total_edges": "25721",
       "analyze": {
         "calls": {
-          "time_ms": 904,
+          "time_ms": 774,
           "success": true
         },
         "callers": {
-          "time_ms": 929,
+          "time_ms": 791,
           "success": true
         },
         "deps": {
-          "time_ms": 902,
-          "success": true
+          "time_ms": 1034,
+          "success": false
         },
         "tree": {
-          "time_ms": 903,
+          "time_ms": 787,
           "success": true
         },
         "complexity": {
-          "time_ms": 901,
+          "time_ms": 774,
           "success": true
         },
         "dead-code": {
-          "time_ms": 999,
+          "time_ms": 838,
           "success": true
         }
       }
@@ -169,6 +175,6 @@
     "classes": 992,
     "modules": 789
   },
-  "db_disk_size": "4.9M",
-  "db_backend": "FalkorDB"
+  "db_disk_size": "174M",
+  "db_backend": "K\u00f9zuDB"
 }

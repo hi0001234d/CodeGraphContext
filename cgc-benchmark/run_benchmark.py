@@ -41,21 +41,23 @@ REPORT_FILE = SCRIPT_DIR / "BENCHMARK_REPORT.md"
 RESULTS_JSON = SCRIPT_DIR / "benchmark_results.json"
 
 # ─── Database Configuration ──────────────────────────────────────────────────
-# IMPORTANT: KùzuDB has a CRITICAL memory corruption bug that causes crashes
-# during indexing (see INDEXING_FAILURE_ANALYSIS.md). If you encounter crashes,
-# switch to FalkorDB by uncommenting the FalkorDB section and commenting out
-# the KùzuDB section below.
+# NOTE: KùzuDB is the ACTIVE backend for this benchmark run (per user request).
+# Historically KùzuDB had memory-corruption issues during indexing of large
+# repos (see INDEXING_FAILURE_ANALYSIS.md). If you hit segfaults / malloc
+# errors while indexing, swap the two sections below: comment KùzuDB out and
+# uncomment the FalkorDB block instead.
 
-# Option 1: KùzuDB (UNSTABLE - has memory corruption bugs)
-#os.environ["DEFAULT_DATABASE"] = "kuzudb"  # Disabled: memory corruption bugs
-#os.environ["KUZUDB_PATH"] = str(KUZUDB_PATH)
-#os.environ["CGC_RUNTIME_DB_TYPE"] = "kuzudb"
+# Option 1: KùzuDB (ACTIVE)
+FALKORDB_PATH = SCRIPT_DIR / "shared_falkordb"  # kept so fallback paths still resolve
+os.environ["DEFAULT_DATABASE"] = "kuzudb"
+os.environ["KUZUDB_PATH"] = str(KUZUDB_PATH)
+os.environ["CGC_RUNTIME_DB_TYPE"] = "kuzudb"
 
-# Option 2: FalkorDB (STABLE - uncomment these lines and comment out KùzuDB above)
-FALKORDB_PATH = SCRIPT_DIR / "shared_falkordb"
-os.environ["DEFAULT_DATABASE"] = "falkordb"
-os.environ["FALKORDB_PATH"] = str(FALKORDB_PATH)
-os.environ["CGC_RUNTIME_DB_TYPE"] = "falkordb"
+# Option 2: FalkorDB (DISABLED — uncomment these lines and comment out KùzuDB
+# above if you need a stable fallback while KùzuDB is misbehaving)
+# os.environ["DEFAULT_DATABASE"] = "falkordb"
+# os.environ["FALKORDB_PATH"] = str(FALKORDB_PATH)
+# os.environ["CGC_RUNTIME_DB_TYPE"] = "falkordb"
 
 # ─── Dynamic DB label (used in logs and report) ──────────────────────────────
 DB_BACKEND = os.environ.get("DEFAULT_DATABASE", "kuzudb").lower()
@@ -109,6 +111,46 @@ def get_git_info(repo_path):
         return commit, date, short
     except Exception:
         return "unknown", "unknown", "unknown"
+
+
+def get_cgc_version_from_pyproject():
+    """Read the CodeGraphContext version directly from pyproject.toml.
+
+    This is the most reliable way to determine the version, because it
+    reflects exactly what's declared in the source tree — independent of
+    whatever `cgc version` might print (which can vary across installs or
+    even fail entirely if the CLI is broken).
+
+    Returns the version string on success, or "unknown" on any failure.
+    """
+    pyproject = CGC_REPO_DIR / "pyproject.toml"
+    if not pyproject.exists():
+        return "unknown"
+    try:
+        # Prefer stdlib tomllib (Python 3.11+) for correctness.
+        try:
+            import tomllib  # type: ignore[import-not-found]
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+            version = data.get("project", {}).get("version")
+            if version:
+                return str(version)
+        except ModuleNotFoundError:
+            pass
+
+        # Fallback: simple regex scan that works on any Python >=3.10.
+        import re
+        text = pyproject.read_text(encoding="utf-8")
+        match = re.search(
+            r'^\s*version\s*=\s*["\']([^"\']+)["\']',
+            text,
+            flags=re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    except Exception as exc:
+        log(f"  ⚠️  Failed to read version from pyproject.toml: {exc}")
+    return "unknown"
 
 
 def _find_uv_bin():
@@ -214,26 +256,83 @@ def verify_cgc_health():
     """Sanity-check that `cgc` actually runs before any benchmarking starts.
 
     Returns the cleaned-up version string on success, raises on failure.
+
+    The check is intentionally *output-driven*, not exit-code-driven:
+      - Hard failure only when the output contains explicit Python-level
+        error indicators (`Traceback`, `ModuleNotFoundError`, `No module
+        named`). Those are unambiguous signs of a broken install.
+      - Otherwise, if the output contains a version-like token
+        ("CodeGraphContext X.Y.Z"), we trust the CLI is functional —
+        **even if the subprocess returned non-zero**. Some CGC subcommands
+        (and certain typer/click versions) exit with 1 after printing help
+        or the version, which used to kill the whole benchmark for no
+        real reason.
+      - A single retry is attempted on completely-empty output to absorb
+        transient hiccups right after `uv pip install` finishes.
     """
+    import re as _re
+
+    def _looks_broken(text):
+        lowered = text.lower()
+        return (
+            "traceback" in lowered
+            or "modulenotfounderror" in lowered
+            or "no module named" in lowered
+        )
+
+    def _extract_version(text):
+        # Look for "CodeGraphContext 0.4.2" style token first, then any
+        # bare semver-like string as a fallback.
+        m = _re.search(r"CodeGraphContext\s+([0-9][\w.\-+]*)", text, _re.IGNORECASE)
+        if m:
+            return f"CodeGraphContext {m.group(1)}"
+        m = _re.search(r"\b(\d+\.\d+(?:\.\d+)?[\w.\-+]*)\b", text)
+        if m:
+            return m.group(1)
+        return None
+
     log("🔎 Verifying CGC installation ...")
     output, duration_ms, success = run_cgc_command(["version"], timeout=60)
-    lowered = output.lower()
-    broken = (
-        not success
-        or "traceback" in lowered
-        or "modulenotfounderror" in lowered
-        or "no module named" in lowered
-    )
-    if broken:
-        log("❌ CGC health check FAILED. Raw output was:")
+
+    # One transient-retry: uv's editable install can briefly leave the shim
+    # in an inconsistent state right after completing.
+    if not output.strip():
+        log("  ⚠️  Empty output on first attempt — retrying once ...")
+        time.sleep(1.0)
+        output, duration_ms, success = run_cgc_command(["version"], timeout=60)
+
+    if _looks_broken(output):
+        log("❌ CGC health check FAILED — Python error detected. Raw output:")
         for line in output.strip().splitlines() or ["<no output>"]:
             log(f"    {line}")
         raise RuntimeError(
-            "CGC is not functional in the benchmark venv. Aborting so we "
-            "don't publish a bogus report full of zero-valued metrics."
+            "CGC is not functional in the benchmark venv (Python traceback "
+            "or missing module detected). Aborting so we don't publish a "
+            "bogus report full of zero-valued metrics."
         )
-    version_lines = [l.strip() for l in output.splitlines() if l.strip()]
-    version_str = version_lines[-1] if version_lines else "unknown"
+
+    version_str = _extract_version(output)
+    if version_str is None:
+        # Neither a recognizable version nor an error pattern. This is
+        # suspicious but not necessarily fatal; dump everything so a
+        # human can decide, and continue with "unknown".
+        log("⚠️  CGC health check: no version token found in output. Raw output:")
+        for line in output.strip().splitlines() or ["<no output>"]:
+            log(f"    {line}")
+        if not success:
+            raise RuntimeError(
+                "CGC `version` returned non-zero AND produced no recognizable "
+                "version string. Treating as a broken install."
+            )
+        version_str = "unknown"
+
+    if not success:
+        log(
+            f"  ⚠️  `cgc version` exited non-zero but printed a valid "
+            f"version ({version_str!r}); treating as healthy. "
+            "(Known quirk of certain typer/click versions.)"
+        )
+
     log(f"✅ CGC healthy ({duration_ms}ms): {version_str}")
     return version_str
 
@@ -325,45 +424,114 @@ def get_system_info():
 
 
 def parse_stats_output(output):
-    """Parse cgc stats output to extract counts."""
+    """Parse `cgc stats` rich-table output to extract counts.
+
+    Robust against:
+      - Unicode box chars (│) *and* plain ASCII pipes (|)
+      - ANSI escape sequences injected by rich on some terminals
+      - Thousands separators in numbers (e.g. "1,125")
+      - Leading/trailing whitespace or rich styling markers
+      - Key variants: "Imported Modules" vs plain "Modules"
+      - Upper/lower case drift
+    """
+    import re
+
     stats = {"files": 0, "functions": 0, "classes": 0, "modules": 0}
-    for line in output.splitlines():
-        if "Files" in line and "│" in line:
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 2 and parts[0] == "Files":
+
+    if not output:
+        return stats
+
+    # Strip any ANSI colour escape sequences that rich may emit.
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    cleaned = ansi_re.sub("", output)
+
+    # Map lowercase label → canonical stats key. Order matters: the longer
+    # "imported modules" label is checked first so it wins over bare
+    # "modules" substring matches.
+    key_map = [
+        ("imported modules", "modules"),
+        ("files", "files"),
+        ("functions", "functions"),
+        ("classes", "classes"),
+        ("modules", "modules"),
+    ]
+
+    for raw_line in cleaned.splitlines():
+        # Normalise both box-drawing borders to a single pipe so one split
+        # handles either backend's table style.
+        line = raw_line.replace("│", "|").replace("┃", "|")
+        if "|" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        if len(parts) < 2:
+            continue
+        label = parts[0].lower().strip()
+        # Strip rich markup like "[bold]Files[/bold]" → "files"
+        label = re.sub(r"\[[^\]]+\]", "", label).strip()
+        value = parts[1].strip().replace(",", "")
+
+        for needle, target in key_map:
+            if needle in label:
+                # Only numeric values; ignore header rows like "| Metric | Count |"
                 try:
-                    stats["files"] = int(parts[1])
+                    stats[target] = int(value)
                 except ValueError:
                     pass
-        elif "Functions" in line and "│" in line:
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 2 and parts[0] == "Functions":
-                try:
-                    stats["functions"] = int(parts[1])
-                except ValueError:
-                    pass
-        elif "Classes" in line and "│" in line:
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 2 and parts[0] == "Classes":
-                try:
-                    stats["classes"] = int(parts[1])
-                except ValueError:
-                    pass
-        elif "Imported Modules" in line and "│" in line:
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 2 and parts[0] == "Imported Modules":
-                try:
-                    stats["modules"] = int(parts[1])
-                except ValueError:
-                    pass
-        elif "Modules" in line and "│" in line and "Imported" not in line:
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 2 and parts[0] == "Modules":
-                try:
-                    stats["modules"] = int(parts[1])
-                except ValueError:
-                    pass
+                break
+
     return stats
+
+
+def get_repo_stats_via_cypher(repo_path):
+    """Last-resort fallback: query raw node counts via `cgc cypher`.
+
+    Used when `parse_stats_output()` returns all zeros but the bounded-depth
+    node/edge count query on the same repository returned non-zero totals.
+    This fights the exact bug we hit on large repos (fastapi) where
+    `cgc stats <path>` either timed out, returned partial data, or its
+    rich-table output got mangled in capture.
+
+    Returns a dict with the same shape as parse_stats_output().
+    """
+    import re as _re
+    abs_path = str(Path(repo_path).resolve())
+    result = {"files": 0, "functions": 0, "classes": 0, "modules": 0}
+
+    queries = {
+        "files": (
+            f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(f:File) "
+            "RETURN count(DISTINCT f) as n"
+        ),
+        "functions": (
+            f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(fn:Function) "
+            "RETURN count(DISTINCT fn) as n"
+        ),
+        "classes": (
+            f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(c:Class) "
+            "RETURN count(DISTINCT c) as n"
+        ),
+        "modules": (
+            f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(m:Module) "
+            "RETURN count(DISTINCT m) as n"
+        ),
+    }
+
+    for key, cypher in queries.items():
+        out, _ms, ok = run_cgc_command(["cypher", cypher], timeout=180)
+        if not ok:
+            continue
+        lowered = out.lower()
+        if "segmentation fault" in lowered or "sigsegv" in lowered:
+            continue
+        # The CLI prints the result value somewhere in the output; grab the
+        # last standalone integer as a safe heuristic.
+        nums = _re.findall(r"\b(\d+)\b", out)
+        if nums:
+            try:
+                result[key] = int(nums[-1])
+            except ValueError:
+                pass
+    return result
 
 
 def get_graph_node_edge_counts(repo_path):
@@ -438,25 +606,53 @@ def main():
     log("  CodeGraphContext (CGC) — BENCHMARK")
     log("=" * 70)
 
+    # Read the declared version from pyproject.toml *before* we touch the
+    # venv. This gives the user an immediate, reliable answer to "which
+    # version am I benchmarking?" even if something later blows up.
+    pyproject_version = get_cgc_version_from_pyproject()
+    log("")
+    log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log(f"  📦 CodeGraphContext version : {pyproject_version}   (from pyproject.toml)")
+    log(f"  🗄️  Database backend         : {DB_LABEL}")
+    log(f"  📂 Source tree               : {CGC_REPO_DIR}")
+    log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    log("")
+
     # STEP 0: Bootstrap an isolated venv and verify that `cgc` is actually
     # functional BEFORE we start timing anything. This is the single most
     # important guard in the whole script — without it we'd happily publish
     # a report where every number is zero because every `cgc` invocation
     # crashed in ~90ms with a ModuleNotFoundError.
     ensure_venv()
-    cgc_version = verify_cgc_health()
+    cgc_cli_version = verify_cgc_health()
+
+    # Prefer the pyproject version as the canonical display string, but
+    # keep the raw CLI output around for debugging. If pyproject couldn't
+    # be read for some reason, fall back to the CLI answer.
+    if pyproject_version != "unknown":
+        cgc_version = pyproject_version
+    else:
+        cgc_version = cgc_cli_version
 
     # System Info
     sys_info = get_system_info()
     cgc_commit, cgc_date, cgc_short = get_git_info(CGC_REPO_DIR)
 
-    log(f"CGC Version: {cgc_version}")
-    log(f"CGC Commit: {cgc_short} ({cgc_date})")
-    log(f"Database: {DB_LABEL} (shared)")
-    log(f"System: {sys_info['os']}")
-    log(f"CPU: {sys_info['cpu']} ({sys_info['cpu_cores']} cores)")
-    log(f"RAM: {sys_info['ram']}")
-    log(f"Python: {sys_info['python']}")
+    log("")
+    log("═══ Benchmark Environment ═══")
+    log(f"CGC Version      : {cgc_version}   (pyproject.toml)")
+    log(f"CGC CLI reports  : {cgc_cli_version}")
+    log(f"CGC Commit       : {cgc_short} ({cgc_date})")
+    log(f"Database         : {DB_LABEL} (shared, embedded)")
+    log(f"Database Path    : {DB_PATH}")
+    log(f"System           : {sys_info['os']}")
+    log(f"CPU              : {sys_info['cpu']} ({sys_info['cpu_cores']} cores)")
+    log(f"RAM              : {sys_info['ram']}")
+    log(f"Python           : {sys_info['python']}")
+    log("")
+    log("Pipeline stages : venv-bootstrap → health-check → clean → "
+        "PHASE 1 index → PHASE 2 stats/graph → PHASE 3 analyze → "
+        "PHASE 4 footprint → report")
     
     # Clean Previous Data
     log("")
@@ -542,24 +738,14 @@ def main():
         log(f"  Commit: {short_commit}")
         log(f"  Files: {total_files} total, {py_files} Python")
         
-        log(f"  ⏱️  Running cgc index --force...")
-        output, duration_ms, success = run_cgc_command(
-            ["index", abs_path, "--force"], timeout=600
-        )
-
-        # Hard-fail if cgc crashed with a Python traceback. This catches
-        # broken installs / missing dependencies that would otherwise
-        # produce a zero-result report.
-        lowered = output.lower()
-        if "traceback" in lowered or "modulenotfounderror" in lowered:
-            log("  ❌ Indexing crashed with an exception — dumping output:")
-            for line in output.strip().splitlines():
-                log(f"      {line}")
-            raise RuntimeError(
-                f"`cgc index` failed for {name}; aborting benchmark."
-            )
-        
-        # Detect segmentation faults, memory corruption, and other native crashes
+        # Retry loop for large repos that hit KùzuDB's non-deterministic
+        # memory-corruption bug. The crash is a malloc-level heap issue
+        # (`malloc_consolidate(): invalid chunk size`, `unaligned fastbin`,
+        # etc.) that sometimes triggers and sometimes doesn't on the same
+        # input — so retrying with a fresh process has a good chance of
+        # succeeding. We ONLY retry on native crashes; Python tracebacks
+        # are always hard-fails because they indicate a broken install.
+        MAX_NATIVE_RETRIES = 2  # total attempts = 1 + MAX_NATIVE_RETRIES
         crash_indicators = [
             "segmentation fault",
             "core dumped",
@@ -570,19 +756,83 @@ def main():
             "invalid chunk size",
             "aborted",
             "sigabrt",
+            "double free",
+            "corrupted size",
         ]
-        if any(indicator in lowered for indicator in crash_indicators):
-            log("  ❌ Indexing crashed with a native error (memory corruption/segfault) — dumping output:")
-            for line in output.strip().splitlines():
-                log(f"      {line}")
-            log("")
-            log("  ⚠️  CRITICAL: This is a KùzuDB memory corruption bug!")
-            log("  ⚠️  See cgc-benchmark/INDEXING_FAILURE_ANALYSIS.md for details.")
-            log("  ⚠️  Consider switching to FalkorDB backend for stable benchmarking.")
-            raise RuntimeError(
-                f"`cgc index` crashed with native error for {name}; aborting benchmark. "
-                "This is a critical bug in KùzuDB or CGC's integration with it."
+
+        output = ""
+        duration_ms = 0
+        success = False
+        native_crash = False
+        crash_reason = None
+
+        for attempt in range(1 + MAX_NATIVE_RETRIES):
+            if attempt == 0:
+                log(f"  ⏱️  Running cgc index --force...")
+            else:
+                log(f"  🔄 Retry attempt {attempt}/{MAX_NATIVE_RETRIES} for {name} ...")
+                # Small pause so the OS can clean up any leftover memory /
+                # fds from the previous crashed process.
+                time.sleep(2.0)
+
+            output, duration_ms, success = run_cgc_command(
+                ["index", abs_path, "--force"], timeout=900
             )
+            lowered = output.lower()
+
+            # Python-level errors → always hard-fail (broken install).
+            if "traceback" in lowered or "modulenotfounderror" in lowered:
+                log("  ❌ Indexing crashed with a Python exception — dumping output:")
+                for line in output.strip().splitlines():
+                    log(f"      {line}")
+                raise RuntimeError(
+                    f"`cgc index` failed for {name}; aborting benchmark."
+                )
+
+            # Native crash detection.
+            hit_indicator = next(
+                (ind for ind in crash_indicators if ind in lowered), None
+            )
+            if hit_indicator:
+                log(
+                    f"  ⚠️  Native error during {name} indexing "
+                    f"(indicator: {hit_indicator!r}) — dumping last lines:"
+                )
+                for line in output.strip().splitlines()[-8:]:
+                    log(f"      {line}")
+                native_crash = True
+                crash_reason = hit_indicator
+                success = False
+                if attempt < MAX_NATIVE_RETRIES:
+                    log(f"  ⏳ Will retry ...")
+                    continue
+                # Out of retries — give up on THIS repo but keep the
+                # overall benchmark alive so we still get useful data
+                # for the other repos.
+                log("")
+                log(f"  ❌ {name}: native crash persists after "
+                    f"{MAX_NATIVE_RETRIES + 1} attempts; giving up on this repo.")
+                log("  ⚠️  CRITICAL: This is a known KùzuDB memory-corruption bug")
+                log("       (non-deterministic; sometimes triggers, sometimes not).")
+                log("  ⚠️  See cgc-benchmark/INDEXING_FAILURE_ANALYSIS.md for details.")
+                log("  ⚠️  Consider switching to FalkorDB backend for stable results.")
+                break
+            else:
+                # No crash → leave the retry loop and proceed to the
+                # success/failure post-checks below.
+                native_crash = False
+                break
+
+        # Skip post-checks entirely for repos that died from a native
+        # crash — the output is meaningless in that case and would just
+        # produce confusing secondary warnings.
+        if native_crash:
+            repo["index_time_ms"] = duration_ms
+            repo["index_success"] = False
+            repo["crash_reason"] = crash_reason
+            log(f"  💥 Indexing FAILED for {name} — native crash: {crash_reason}")
+            log(f"     (Benchmark continues with remaining repos.)")
+            continue
 
         # Suspiciously fast result ⇒ the command returned before any real
         # work happened (e.g. silent early-exit, missing DB driver, ...).
@@ -596,7 +846,7 @@ def main():
             for line in output.strip().splitlines():
                 log(f"      {line}")
             success = False
-        
+
         # Verify indexing actually produced results by checking the output message
         # CGC outputs "Successfully re-indexed: <path> in X.XX seconds" on success
         # We'll trust this message if it appears (don't require file count in output)
@@ -607,7 +857,7 @@ def main():
                 "successfully re-indexed" in output_lower or
                 "successfully indexed" in output_lower
             )
-            
+
             # Only mark as failed if there's clear error indication
             # (not just absence of file count, since CGC doesn't print that)
             has_error = (
@@ -615,7 +865,7 @@ def main():
                 "failed" in output_lower or
                 "exception" in output_lower
             )
-            
+
             if has_error:
                 log(
                     f"  ❌  Index command shows errors in output. Treating as failure."
@@ -634,10 +884,11 @@ def main():
 
         repo["index_time_ms"] = duration_ms
         repo["index_success"] = success
-        
+        repo["crash_reason"] = None
+
         status_icon = "✅" if success else "❌"
         log(f"  {status_icon} Indexing completed in {fmt_time(duration_ms)}")
-        
+
         # Show last few lines of output for context
         for line in output.strip().splitlines()[-3:]:
             log(f"    {line}")
@@ -652,34 +903,87 @@ def main():
         name = repo["name"]
         repo_path = REPOS_DIR / name
         abs_path = str(repo_path.resolve())
-        
+
         log("")
         log(f"━━━ [{repo['tier']}] {repo['github']} ━━━")
-        
+
+        # Skip graph queries for repos whose indexing died from a native
+        # crash — the database has no data for them and we'd just waste
+        # time (or trigger another crash). Record zeros and move on.
+        if repo.get("crash_reason"):
+            log(
+                f"  ⏭️  Skipping stats/graph queries for {name}: "
+                f"indexing crashed ({repo['crash_reason']})"
+            )
+            repo["stats"] = {"files": 0, "functions": 0, "classes": 0, "modules": 0}
+            repo["stats_time_ms"] = 0
+            repo["stats_source"] = "crashed"
+            repo["total_nodes"] = "CRASH"
+            repo["total_edges"] = "CRASH"
+            continue
+
+        # Large repos (fastapi ~1100 py files) can easily blow past the old
+        # 300s limit on KùzuDB because `cgc stats <path>` walks the graph.
+        # Give the query enough headroom to actually finish.
         log(f"  Running cgc stats...")
-        stats_output, stats_ms, stats_success = run_cgc_command(["stats", abs_path], timeout=300)
-        
-        # Detect segfaults in stats output
+        stats_output, stats_ms, stats_success = run_cgc_command(
+            ["stats", abs_path], timeout=900
+        )
+
+        # Detect segfaults / timeouts in stats output
         stats_lowered = stats_output.lower()
+        stats_timed_out = stats_lowered.startswith("timeout after")
         if "segmentation fault" in stats_lowered or "core dumped" in stats_lowered or "sigsegv" in stats_lowered:
             log(f"  ❌ Stats command crashed with segmentation fault")
             stats_success = False
             stats_output = ""
-        
+        elif stats_timed_out:
+            log(f"  ⚠️  `cgc stats {name}` timed out — will use cypher fallback")
+            stats_success = False
+
         stats = parse_stats_output(stats_output)
         repo["stats"] = stats
         repo["stats_time_ms"] = stats_ms
-        
-        log(f"  Stats query: {fmt_time(stats_ms)}")
+
+        # If parsing produced all zeros but the command itself didn't crash,
+        # something about the output format tripped up the parser (or the
+        # command silently returned no rows). Dump the first 500 chars so
+        # we can actually *see* the format next time, and then fall back to
+        # raw cypher queries which bypass CLI formatting entirely.
+        parsed_any = any(v > 0 for v in stats.values())
+        if not parsed_any:
+            log(f"  ⚠️  Parsed stats are all zeros. Raw `cgc stats` output (first 500 chars):")
+            preview = stats_output[:500].replace("\n", "\n      ")
+            log(f"      {preview!r}")
+            log(f"  🔄 Falling back to direct cypher queries for {name}...")
+            fallback_stats = get_repo_stats_via_cypher(repo_path)
+            if any(v > 0 for v in fallback_stats.values()):
+                log(
+                    f"  ✅ Cypher fallback succeeded: "
+                    f"files={fallback_stats['files']}, "
+                    f"functions={fallback_stats['functions']}, "
+                    f"classes={fallback_stats['classes']}, "
+                    f"modules={fallback_stats['modules']}"
+                )
+                stats = fallback_stats
+                repo["stats"] = stats
+                repo["stats_source"] = "cypher_fallback"
+            else:
+                log(f"  ❌ Cypher fallback also returned zeros")
+                repo["stats_source"] = "failed"
+        else:
+            repo["stats_source"] = "cgc_stats"
+
+        log(f"  Stats query: {fmt_time(stats_ms)}  (source: {repo.get('stats_source', 'cgc_stats')})")
         log(f"  Files: {stats.get('files', 'N/A')}, Functions: {stats.get('functions', 'N/A')}, Classes: {stats.get('classes', 'N/A')}, Modules: {stats.get('modules', 'N/A')}")
-        
+
         log(f"  Querying total nodes and edges (bounded depth)...")
         nodes, edges, nodes_ms, edges_ms = get_graph_node_edge_counts(repo_path)
         repo["total_nodes"] = nodes
         repo["total_edges"] = edges
-        
+
         log(f"  Nodes: {nodes} ({fmt_time(nodes_ms)}), Edges: {edges} ({fmt_time(edges_ms)})")
-        
+
         # Verify indexing actually worked by checking if stats show files
         stats_files = repo["stats"].get("files", 0)
         py_files = repo.get("py_files", 0)
@@ -690,7 +994,20 @@ def main():
         elif stats_files > 0:
             log(f"  ⚠️  Partial indexing: {stats_files}/{py_files} files indexed")
         else:
-            log(f"  ❌ Indexing failed: 0 files in database")
+            # Sanity check: if bounded-depth traversal found thousands of
+            # nodes then the graph clearly has data; flag it as a reporting
+            # issue rather than an indexing failure.
+            try:
+                nodes_int = int(nodes)
+            except (TypeError, ValueError):
+                nodes_int = 0
+            if nodes_int > 0:
+                log(
+                    f"  ⚠️  0 files reported by stats but {nodes_int} total nodes "
+                    f"exist — likely a stats-reporting issue, not indexing."
+                )
+            else:
+                log(f"  ❌ Indexing failed: 0 files in database")
     
     # Overall stats
     log("")
@@ -718,11 +1035,25 @@ def main():
     for repo in REPOS:
         name = repo["name"]
         repo["analyze"] = {}
-        
+
         log("")
         log(f"━━━ [{repo['tier']}] {repo['github']} ━━━")
+
+        # Skip analyze commands for crashed repos — they have no data to
+        # analyze and the commands would either return empty results or
+        # trigger another native crash.
+        if repo.get("crash_reason"):
+            log(f"  ⏭️  Skipping analyze commands: indexing crashed ({repo['crash_reason']})")
+            for cmd_name, _ in analyze_commands:
+                repo["analyze"][cmd_name] = {
+                    "time_ms": 0,
+                    "success": False,
+                    "skipped": True,
+                }
+            continue
+
         log(f"  Test function: {repo['test_function']}, Test class: {repo['test_class']}")
-        
+
         for cmd_name, cmd_builder in analyze_commands:
             args = cmd_builder(repo)
             log(f"  ⏱️  cgc {' '.join(args)}...")
@@ -829,22 +1160,52 @@ def main():
     
     # Indexing Performance
     report.append("## ⏱️ Indexing Performance (`cgc index --force`)\n")
-    report.append("| Repository | Tier | Total Files | Python Files | Indexing Time | Files/sec |")
-    report.append("|-----------|------|-------------|--------------|---------------|-----------|")
+    report.append("| Repository | Tier | Total Files | Python Files | Status | Indexing Time | Files/sec |")
+    report.append("|-----------|------|-------------|--------------|--------|---------------|-----------|")
     for repo in REPOS:
-        rate = fmt_rate(repo["total_files"], repo["index_time_ms"])
+        if repo.get("crash_reason"):
+            status = f"💥 CRASH (`{repo['crash_reason']}`)"
+            rate = "N/A"
+        elif repo.get("index_success"):
+            status = "✅ OK"
+            rate = fmt_rate(repo["total_files"], repo["index_time_ms"])
+        else:
+            status = "⚠️ FAILED"
+            rate = fmt_rate(repo["total_files"], repo["index_time_ms"])
         report.append(
             f"| **{repo['name']}** | {repo['tier_emoji']} {repo['tier']} | {repo['total_files']} | "
-            f"{repo['py_files']} | {fmt_time(repo['index_time_ms'])} | {rate} |"
+            f"{repo['py_files']} | {status} | {fmt_time(repo['index_time_ms'])} | {rate} |"
         )
     report.append("")
+    # Flag any crashed repos with a prominent warning block.
+    crashed = [r for r in REPOS if r.get("crash_reason")]
+    if crashed:
+        report.append("> ⚠️ **Native crash detected during indexing**")
+        report.append(">")
+        for r in crashed:
+            report.append(
+                f"> - **{r['name']}** ({r['github']}) crashed with "
+                f"`{r['crash_reason']}` after {1 + 2} attempts. "
+                "This is a known KùzuDB memory-corruption issue that is "
+                "non-deterministic; retrying the benchmark may succeed. "
+                "For reliable runs, consider switching to the FalkorDB "
+                "backend in `run_benchmark.py` (swap the Option 1 / "
+                "Option 2 comment blocks)."
+            )
+        report.append("")
     report.append("---\n")
-    
+
     # Graph Statistics
     report.append("## 📈 Graph Statistics (Nodes & Edges)\n")
     report.append("| Repository | Tier | Files Indexed | Functions | Classes | Imported Modules | Total Nodes | Total Edges |")
     report.append("|-----------|------|--------------|-----------|---------|------------------|-------------|-------------|")
     for repo in REPOS:
+        if repo.get("crash_reason"):
+            report.append(
+                f"| **{repo['name']}** | {repo['tier_emoji']} {repo['tier']} | "
+                f"💥 CRASH | — | — | — | — | — |"
+            )
+            continue
         s = repo.get("stats", {})
         report.append(
             f"| **{repo['name']}** | {repo['tier_emoji']} {repo['tier']} | "
@@ -871,6 +1232,9 @@ def main():
         row = f"| `analyze {cmd_name}` |"
         for repo in REPOS:
             a = repo.get("analyze", {}).get(cmd_name, {})
+            if a.get("skipped"):
+                row += " ⏭️ SKIP |"
+                continue
             t = a.get("time_ms", 0)
             success = a.get("success", False)
             mark = "" if success else " ⚠️"
