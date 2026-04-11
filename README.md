@@ -5,8 +5,10 @@
 🌐 **Languages:**
 - 🇬🇧 [English](README.md)
 - 🇨🇳 [中文](README.zh-CN.md)
+- 🇰🇷 [한국어](README.kor.md)
+- 🇺🇦 [Українська](README.uk.md)
+- 🇷🇺 [Русский](README.ru-RU.md)
 - 🇯🇵 日本語 (Soon)
-- 🇷🇺 Русский (Soon)
 - 🇪🇸 Español (Soon)
 
 🌍 **Help translate CodeGraphContext to your language by raising an issue & PR on https://github.com/Shashankss1205/CodeGraphContext/issues!**
@@ -95,7 +97,7 @@ A powerful **MCP server** and **CLI toolkit** that indexes local code into a gra
 ---
 
 ## Project Details
-- **Version:** 0.3.1
+- **Version:** 0.4.2
 - **Authors:** Shashank Shekhar Singh <shashankshekharsingh1205@gmail.com>
 - **License:** MIT License (See [LICENSE](LICENSE) for details)
 - **Website:** [CodeGraphContext](http://codegraphcontext.vercel.app/)
@@ -128,7 +130,7 @@ A powerful **MCP server** and **CLI toolkit** that indexes local code into a gra
 -   **Interactive Setup:** A user-friendly command-line wizard for easy setup.
 -   **Dual Mode:** Works as a standalone **CLI toolkit** for developers and as an **MCP server** for AI agents.
 -   **Multi-Language Support:** Full support for 14 programming languages.
--   **Flexible Database Backend:** KùzuDB (default, zero-config for all platforms), FalkorDB Lite (Unix-only), FalkorDB Remote, or Neo4j (all platforms via Docker/native).
+-   **Flexible Database Backend:** KùzuDB (default on Windows), FalkorDB Lite (typical embedded default on Unix when installed), FalkorDB Remote, or Neo4j (all platforms via Docker/native).
 
 ---
 
@@ -152,8 +154,9 @@ Each language parser extracts functions, classes, methods, parameters, inheritan
 
 CodeGraphContext supports multiple graph database backends to suit your environment:
 
-| Feature | KùzuDB (Default) | FalkorDB Lite | Neo4j |
+| Feature | KùzuDB | FalkorDB Lite | Neo4j |
 | :--- | :--- | :--- | :--- |
+| **Typical default** | **Windows** (embedded, when `kuzu` is installed) | **Unix** (Python 3.12+, when `falkordblite` works) | When explicitly configured |
 | **Setup** | Zero-config / Embedded | Zero-config / In-process | Docker / External |
 | **Platform** | **All (Windows Native, macOS, Linux)** | Unix-only (Linux/macOS/WSL) | All Platforms |
 | **Use Case** | Desktop, IDE, Local development | Specialized Unix development | Enterprise, Massive graphs |
@@ -182,7 +185,7 @@ _If you’re using CodeGraphContext in your project, feel free to open a PR and 
 - `stdlibs>=2023.11.18`
 - `typer[all]>=0.9.0`
 - `rich>=13.7.0`
-- `inquirerpy>=0.3.4`
+- `inquirerpy>=0.3.7`
 - `python-dotenv>=1.0.0`
 - `tree-sitter>=0.21.0`
 - `tree-sitter-language-pack>=0.6.0`
@@ -204,7 +207,7 @@ pip install codegraphcontext
 
 ### If 'cgc' command isn't found, run our one-line fix:
 ```
-curl -sSL [https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh](https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh) | bash
+curl -sSL https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh | bash
 ```
 
 ---
@@ -268,8 +271,8 @@ Use CodeGraphContext as an **MCP server** for AI assistants:
 
 2.  **Database Setup (Automatic)**
     
-    - **KùzuDB (Default):** Runs natively on Windows, macOS, and Linux without any setup. Just `pip install kuzu` and you're ready!
-    - **FalkorDB Lite (Alternative):** Supported on Unix/macOS/WSL for Python 3.12+.
+    - **KùzuDB (default on Windows):** Runs natively on Windows, macOS, and Linux. On Windows it is the usual embedded choice; `pip install kuzu` if needed.
+    - **FalkorDB Lite (typical default on Unix):** When Python 3.12+ and `falkordblite` are available on Unix/macOS/WSL, the embedded backend prefers FalkorDB Lite; otherwise KùzuDB is used.
     - **Neo4j (Alternative):** To use Neo4j instead, or if you prefer a server-based approach, run: `cgc neo4j setup`
 
 ---
@@ -300,7 +303,7 @@ cgc watch .
 cgc help
 ```
 
-**See the full [CLI Commands Guide](CLI_Commands.md) for all available commands and usage scenarios.**
+  **See the full [CLI Commands Guide](docs/CLI_COMPLETE_REFERENCE.md) for all available commands and usage scenarios.**
 
 ### 🎨 Premium Interactive Visualization
 CodeGraphContext can generate stunning, interactive knowledge graphs of your code. Unlike static diagrams, these are premium web-based explorers:

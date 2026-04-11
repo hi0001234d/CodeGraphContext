@@ -5,8 +5,24 @@ from typing import Any, Dict, List, Literal, Optional
 from pathlib import Path
 
 from ..core.database import DatabaseManager
+from ..utils.path_ignore import cypher_path_not_under_ignore_dirs
 
 logger = logging.getLogger(__name__)
+
+
+def _levenshtein_distance(a: str, b: str) -> int:
+    """Levenshtein distance for short identifiers (typo-tolerant name search)."""
+    if len(a) < len(b):
+        return _levenshtein_distance(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (c1 != c2)))
+        prev = curr
+    return prev[-1]
 
 class CodeFinder:
     """Module for finding relevant code snippets and analyzing relationships."""
@@ -14,12 +30,12 @@ class CodeFinder:
     def __init__(self, db_manager: DatabaseManager):
         self.db_manager = db_manager
         self.driver = self.db_manager.get_driver()
-        self._is_falkordb = getattr(db_manager, 'get_backend_type', lambda: 'neo4j')() != 'neo4j'
+        self._lacks_native_fulltext = getattr(db_manager, 'get_backend_type', lambda: 'neo4j')() != 'neo4j'
 
     def format_query(self, find_by: Literal["Class", "Function"], fuzzy_search:bool, repo_path: Optional[str] = None) -> str:
         """Format the search query based on the search type and fuzzy search settings."""
         repo_filter = "AND node.path STARTS WITH $repo_path" if repo_path else ""
-        if self._is_falkordb:
+        if self._lacks_native_fulltext:
             # FalkorDB does not support CALL db.idx.fulltext.queryNodes.
             # Fall back to a pure Cypher CONTAINS/toLower match on node name.
             name_filter = "toLower(node.name) CONTAINS toLower($search_term)"
@@ -41,11 +57,52 @@ class CodeFinder:
                 LIMIT 20
             """
 
-    def find_by_function_name(self, search_term: str, fuzzy_search: bool, repo_path: Optional[str] = None) -> List[Dict]:
-        """Find functions by name matching."""
+    def _find_by_name_fuzzy_portable(
+        self,
+        label: Literal["Function", "Class"],
+        search_term: str,
+        edit_distance: int,
+        repo_path: Optional[str],
+    ) -> List[Dict]:
+        """Fuzzy name match for backends without Lucene fuzzy syntax (Kùzu, FalkorDB, …)."""
+        if not search_term.strip():
+            return []
+        where_clause = "WHERE node.path STARTS WITH $repo_path" if repo_path else ""
+        limit_tail = "" if repo_path else " LIMIT 8000"
+        params: Dict[str, Any] = {}
+        if repo_path:
+            params["repo_path"] = repo_path
+        query = f"""
+            MATCH (node:{label})
+            {where_clause}
+            RETURN node.name as name, node.path as path, node.line_number as line_number,
+                node.source as source, node.docstring as docstring, node.is_dependency as is_dependency
+            {limit_tail}
+        """
         with self.driver.session() as session:
-            if not fuzzy_search:
-                # Use simple match for exact search to avoid fulltext index dependency
+            rows = session.run(query, **params).data()
+        q = search_term.lower()
+        scored: List[tuple[int, Dict]] = []
+        for row in rows:
+            nm = row.get("name")
+            if not isinstance(nm, str):
+                continue
+            d = _levenshtein_distance(q, nm.lower())
+            if d <= edit_distance:
+                scored.append((d, row))
+        scored.sort(key=lambda x: x[0])
+        return [r for _, r in scored[:20]]
+
+    def find_by_function_name(
+        self,
+        search_term: str,
+        fuzzy_search: bool,
+        repo_path: Optional[str] = None,
+        edit_distance: int = 2,
+    ) -> List[Dict]:
+        """Find functions by name matching."""
+        if not fuzzy_search:
+            with self.driver.session() as session:
                 result = session.run(f"""
                     MATCH (node:Function {{name: $name}})
                     {"WHERE node.path STARTS WITH $repo_path" if repo_path else ""}
@@ -54,19 +111,31 @@ class CodeFinder:
                     LIMIT 20
                 """, name=search_term, repo_path=repo_path)
                 return result.data()
-            
-            # Fuzzy search using fulltext index (Neo4j) or CONTAINS fallback (FalkorDB)
-            # On FalkorDB, format_query uses CONTAINS so we pass the raw term; on Neo4j
-            # we need the Lucene field-selector prefix.
-            formatted_search_term = search_term if self._is_falkordb else f"name:{search_term}"
-            result = session.run(self.format_query("Function", fuzzy_search, repo_path), search_term=formatted_search_term, repo_path=repo_path)
+
+        if self._lacks_native_fulltext:
+            return self._find_by_name_fuzzy_portable(
+                "Function", search_term, edit_distance, repo_path
+            )
+
+        formatted_search_term = f"name:{search_term}"
+        with self.driver.session() as session:
+            result = session.run(
+                self.format_query("Function", fuzzy_search, repo_path),
+                search_term=formatted_search_term,
+                repo_path=repo_path,
+            )
             return result.data()
 
-    def find_by_class_name(self, search_term: str, fuzzy_search: bool, repo_path: Optional[str] = None) -> List[Dict]:
+    def find_by_class_name(
+        self,
+        search_term: str,
+        fuzzy_search: bool,
+        repo_path: Optional[str] = None,
+        edit_distance: int = 2,
+    ) -> List[Dict]:
         """Find classes by name matching."""
-        with self.driver.session() as session:
-            if not fuzzy_search:
-                # Use simple match for exact search to avoid fulltext index dependency
+        if not fuzzy_search:
+            with self.driver.session() as session:
                 result = session.run(f"""
                     MATCH (node:Class {{name: $name}})
                     {"WHERE node.path STARTS WITH $repo_path" if repo_path else ""}
@@ -76,11 +145,18 @@ class CodeFinder:
                 """, name=search_term, repo_path=repo_path)
                 return result.data()
 
-            # Fuzzy search using fulltext index (Neo4j) or CONTAINS fallback (FalkorDB)
-            # On FalkorDB, format_query uses CONTAINS so we pass the raw term; on Neo4j
-            # we need the Lucene field-selector prefix.
-            formatted_search_term = search_term if self._is_falkordb else f"name:{search_term}"
-            result = session.run(self.format_query("Class", fuzzy_search, repo_path), search_term=formatted_search_term, repo_path=repo_path)
+        if self._lacks_native_fulltext:
+            return self._find_by_name_fuzzy_portable(
+                "Class", search_term, edit_distance, repo_path
+            )
+
+        formatted_search_term = f"name:{search_term}"
+        with self.driver.session() as session:
+            result = session.run(
+                self.format_query("Class", fuzzy_search, repo_path),
+                search_term=formatted_search_term,
+                repo_path=repo_path,
+            )
             return result.data()
 
     def find_by_variable_name(self, search_term: str, repo_path: Optional[str] = None) -> List[Dict]:
@@ -99,7 +175,7 @@ class CodeFinder:
 
     def find_by_content(self, search_term: str, repo_path: Optional[str] = None) -> List[Dict]:
         """Find code by content matching in source or docstrings using the full-text index."""
-        if self._is_falkordb:
+        if self._lacks_native_fulltext:
             return self._find_by_content_falkordb(search_term, repo_path)
         with self.driver.session() as session:
             result = session.run(f"""
@@ -180,23 +256,26 @@ class CodeFinder:
 
     def find_related_code(self, user_query: str, fuzzy_search: bool, edit_distance: int, repo_path: Optional[str] = None) -> Dict[str, Any]:
         """Find code related to a query using multiple search strategies"""
-        # FalkorDB does not support Lucene-style fuzzy edit-distance syntax (e.g. term~2).
-        # On FalkorDB, always use the plain query so that the CONTAINS-based fallbacks work.
-        if fuzzy_search and self._is_falkordb:
-            logger.debug("FalkorDB backend: ignoring fuzzy edit-distance normalisation; using plain CONTAINS search.")
-            fuzzy_search = False
-
-        if fuzzy_search:
-            user_query_normalized = " ".join(map(lambda x: f"{x}~{edit_distance}", user_query.split(" ")))
-        else:
-            user_query_normalized = user_query
+        # Neo4j full-text uses Lucene fuzzy tokens (e.g. name:foo~2). Kùzu/FalkorDB use
+        # portable Levenshtein over candidate names instead.
+        lucene_fuzzy_query = (
+            " ".join(f"{t}~{edit_distance}" for t in user_query.split())
+            if fuzzy_search and not self._lacks_native_fulltext
+            else user_query
+        )
+        name_lookup_q = lucene_fuzzy_query if (fuzzy_search and not self._lacks_native_fulltext) else user_query
+        content_lookup_q = lucene_fuzzy_query if (fuzzy_search and not self._lacks_native_fulltext) else user_query
 
         results: Dict[str, Any] = {
-            "query": user_query_normalized,
-            "functions_by_name": self.find_by_function_name(user_query_normalized, fuzzy_search, repo_path),
-            "classes_by_name": self.find_by_class_name(user_query_normalized, fuzzy_search, repo_path),
+            "query": lucene_fuzzy_query if fuzzy_search else user_query,
+            "functions_by_name": self.find_by_function_name(
+                name_lookup_q, fuzzy_search, repo_path, edit_distance
+            ),
+            "classes_by_name": self.find_by_class_name(
+                name_lookup_q, fuzzy_search, repo_path, edit_distance
+            ),
             "variables_by_name": self.find_by_variable_name(user_query, repo_path),  # no fuzzy for variables as they are not using full-text index
-            "content_matches": self.find_by_content(user_query_normalized, repo_path)
+            "content_matches": self.find_by_content(content_lookup_q, repo_path),
         }
         
         all_results: List[Dict[str, Any]] = []
@@ -539,9 +618,13 @@ class CodeFinder:
 
         with self.driver.session() as session:
             repo_filter = "AND func.path STARTS WITH $repo_path" if repo_path else ""
-            result = session.run(f"""
+            decorator_filter = "AND ALL(decorator_name IN $exclude_decorated_with WHERE NOT decorator_name IN func.decorators)" if exclude_decorated_with else ""
+            func_ignore = cypher_path_not_under_ignore_dirs("func.path")
+            caller_ignore = cypher_path_not_under_ignore_dirs("caller.path")
+            
+            query = f"""
                 MATCH (func:Function)
-                WHERE func.is_dependency = false {repo_filter}
+                WHERE func.is_dependency = false {repo_filter} {func_ignore}
                   AND NOT func.name IN ['main', 'setup', 'run']
                   AND NOT (func.name STARTS WITH '__' AND func.name ENDS WITH '__')
                   AND NOT func.name STARTS WITH '_test'
@@ -550,10 +633,10 @@ class CodeFinder:
                   AND NOT toLower(func.name) CONTAINS 'application'
                   AND NOT toLower(func.name) CONTAINS 'entry'
                   AND NOT toLower(func.name) CONTAINS 'entrypoint'
-                  AND ALL(decorator_name IN $exclude_decorated_with WHERE NOT decorator_name IN func.decorators)
+                  {decorator_filter}
                 WITH func
                 OPTIONAL MATCH (caller:Function)-[:CALLS]->(func)
-                WHERE caller.is_dependency = false
+                WHERE caller.is_dependency = false {caller_ignore}
                 WITH func, count(caller) as caller_count
                 WHERE caller_count = 0
                 OPTIONAL MATCH (file:File)-[:CONTAINS]->(func)
@@ -566,7 +649,15 @@ class CodeFinder:
                     file.name as file_name
                 ORDER BY func.path, func.line_number
                 LIMIT 50
-            """, exclude_decorated_with=exclude_decorated_with, repo_path=repo_path)
+            """
+            
+            params = {}
+            if repo_path:
+                params["repo_path"] = repo_path
+            if exclude_decorated_with:
+                params["exclude_decorated_with"] = exclude_decorated_with
+                
+            result = session.run(query, **params)
             
             return {
                 "potentially_unused_functions": result.data(),
@@ -581,8 +672,8 @@ class CodeFinder:
                 # KùzuDB-compatible: Use anonymous end node and filter with WHERE
                 query = f"""
                     MATCH p = (f:Function)-[:CALLS*]->()
-                    WITH f, p, nodes(p) as path_nodes
-                    WITH f, path_nodes, list_extract(path_nodes, size(path_nodes)) as target
+                    WITH f as f, p as p, nodes(p) as path_nodes
+                    WITH f as f, path_nodes as path_nodes, path_nodes[size(path_nodes)] as target
                     WHERE target.name = $function_name AND target.path = $path {repo_filter}
                     RETURN DISTINCT f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
                     ORDER BY caller_is_dependency ASC, caller_file_path, caller_line_number
@@ -593,8 +684,8 @@ class CodeFinder:
                 # KùzuDB-compatible: Use anonymous end node and filter with WHERE
                 query = f"""
                     MATCH p = (f:Function)-[:CALLS*]->()
-                    WITH f, p, nodes(p) as path_nodes
-                    WITH f, path_nodes, list_extract(path_nodes, size(path_nodes)) as target
+                    WITH f as f, p as p, nodes(p) as path_nodes
+                    WITH f as f, path_nodes as path_nodes, path_nodes[size(path_nodes)] as target
                     WHERE target.name = $function_name {repo_filter}
                     RETURN DISTINCT f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
                     ORDER BY caller_is_dependency ASC, caller_file_path, caller_line_number
@@ -612,8 +703,8 @@ class CodeFinder:
                 query = f"""
                     MATCH (caller:Function {{name: $function_name, path: $path}})
                     MATCH p = (caller)-[:CALLS*]->()
-                    WITH p, nodes(p) as path_nodes
-                    WITH list_extract(path_nodes, size(path_nodes)) as f
+                    WITH p as p, nodes(p) as path_nodes
+                    WITH path_nodes[size(path_nodes)] as f
                     {repo_filter}
                     RETURN DISTINCT f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
                     ORDER BY callee_is_dependency ASC, callee_file_path, callee_line_number
@@ -625,8 +716,8 @@ class CodeFinder:
                 query = f"""
                     MATCH (caller:Function {{name: $function_name}})
                     MATCH p = (caller)-[:CALLS*]->()
-                    WITH p, nodes(p) as path_nodes
-                    WITH list_extract(path_nodes, size(path_nodes)) as f
+                    WITH p as p, nodes(p) as path_nodes
+                    WITH path_nodes[size(path_nodes)] as f
                     {repo_filter}
                     RETURN DISTINCT f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
                     ORDER BY callee_is_dependency ASC, callee_file_path, callee_line_number
@@ -647,24 +738,12 @@ class CodeFinder:
             query = f"""
                 MATCH (start:Function {start_props}), (end_target:Function {end_props})
                 {repo_filter}
-                WITH start, end_target
+                WITH start as start, end_target as end_target
                 MATCH path = (start)-[:CALLS*1..{max_depth}]->()
-                WITH path, end_target, nodes(path) as func_nodes, relationships(path) as call_rels
-                WITH path, func_nodes, call_rels, list_extract(func_nodes, size(func_nodes)) as path_end
+                WITH path as path, end_target as end_target, nodes(path) as func_nodes, relationships(path) as call_rels
+                WITH path as path, func_nodes as func_nodes, call_rels as call_rels, end_target as end_target, func_nodes[size(func_nodes)] as path_end
                 WHERE path_end.name = end_target.name AND (end_target.path IS NULL OR path_end.path = end_target.path)
-                RETURN 
-                    [node in func_nodes | {{
-                        name: node.name,
-                        path: node.path,
-                        line_number: node.line_number,
-                        is_dependency: node.is_dependency
-                    }}] as function_chain,
-                    [rel in call_rels | {{
-                        call_line: rel.line_number,
-                        args: rel.args,
-                        full_call_name: rel.full_call_name
-                    }}] as call_details,
-                    length(path) as chain_length
+                RETURN func_nodes as function_nodes, call_rels as call_nodes, size(call_rels) as chain_length
                 ORDER BY chain_length ASC
                 LIMIT 20
             """
@@ -679,7 +758,67 @@ class CodeFinder:
             }
             
             result = session.run(query, **params)
-            return result.data()
+
+            # Post-process Node/Rel objects into plain dicts so CLI output stays stable
+            rows = result.data()
+            transformed: List[Dict[str, Any]] = []
+            for row in rows:
+                func_nodes = row.get("function_nodes") or []
+                rel_nodes = row.get("call_nodes") or []
+                chain_len = row.get("chain_length", 0)
+
+                function_chain = []
+                for n in func_nodes:
+                    # Depending on KùzuDB + driver wrapping, list elements can arrive
+                    # either as Node/Rel objects or already-materialized dicts.
+                    if isinstance(n, dict):
+                        props = n
+                    else:
+                        props = None
+                        try:
+                            props = n.get_properties()
+                        except Exception:
+                            props = getattr(n, "properties", None)
+                        if props is None:
+                            props = {}
+                    function_chain.append(
+                        {
+                            "name": props.get("name"),
+                            "path": props.get("path"),
+                            "line_number": props.get("line_number"),
+                            "is_dependency": props.get("is_dependency"),
+                        }
+                    )
+
+                call_details = []
+                for r in rel_nodes:
+                    if isinstance(r, dict):
+                        props = r
+                    else:
+                        props = None
+                        try:
+                            props = r.get_properties()
+                        except Exception:
+                            props = getattr(r, "properties", None)
+                        if props is None:
+                            props = {}
+                    call_details.append(
+                        {
+                            "call_line": props.get("line_number"),
+                            "args": props.get("args"),
+                            "full_call_name": props.get("full_call_name"),
+                        }
+                    )
+
+                transformed.append(
+                    {
+                        "function_chain": function_chain,
+                        "call_details": call_details,
+                        "chain_length": chain_len,
+                    }
+                )
+
+            return transformed
 
     def find_by_type(self, element_type: str, limit: int = 50) -> List[Dict]:
         """Find all elements of a specific type (Function, Class, File, Module)."""
@@ -762,62 +901,63 @@ class CodeFinder:
         """Find the scope and usage patterns of a variable, optional file path filtering"""
         with self.driver.session() as session:
             repo_filter = "AND var.path STARTS WITH $repo_path" if repo_path else ""
-            if path:
-                variable_instances = session.run(f"""
-                    MATCH (var:Variable {{name: $variable_name}})
-                    WHERE (var.path ENDS WITH $path OR var.path = $path) {repo_filter}
-                    OPTIONAL MATCH (container)-[:CONTAINS]->(var)
-                    WHERE container:Function OR container:Class OR container:File
-                    OPTIONAL MATCH (file:File)-[:CONTAINS]->(var)
-                    RETURN DISTINCT
-                        var.name as variable_name,
-                        var.value as variable_value,
-                        var.line_number as line_number,
-                        var.context as context,
-                        COALESCE(var.path, file.path) as path,
-                        CASE 
+            path_filter = "(var.path ENDS WITH $path OR var.path = $path)" if path else "1=1"
+
+            # Two-pass approach for KuzuDB compatibility (doesn't support
+            # OPTIONAL MATCH referencing variables bound in a prior MATCH).
+            # Pass 1: variables WITH a container
+            contained = session.run(f"""
+                MATCH (container)-[:CONTAINS]->(var:Variable {{name: $variable_name}})
+                WHERE {path_filter} {repo_filter}
+                RETURN DISTINCT
+                    var.name as variable_name,
+                    var.value as variable_value,
+                    var.line_number as line_number,
+                    var.context as context,
+                    var.path as path,
+                    CASE
                         WHEN container:Function THEN 'function'
                         WHEN container:Class THEN 'class'
                         ELSE 'module'
                     END as scope_type,
-                    CASE 
+                    CASE
                         WHEN container:Function THEN container.name
                         WHEN container:Class THEN container.name
                         ELSE 'module_level'
                     END as scope_name,
                     var.is_dependency as is_dependency
-                ORDER BY var.is_dependency ASC, path, line_number
             """, variable_name=variable_name, path=path, repo_path=repo_path)
-            else:
-                variable_instances = session.run(f"""
+            instances = contained.data()
+
+            # Pass 2: variables WITHOUT any container (module-level)
+            try:
+                orphaned = session.run(f"""
                     MATCH (var:Variable {{name: $variable_name}})
-                    WHERE 1=1 {repo_filter}
-                    OPTIONAL MATCH (container)-[:CONTAINS]->(var)
-                    WHERE container:Function OR container:Class OR container:File
-                    OPTIONAL MATCH (file:File)-[:CONTAINS]->(var)
+                    WHERE {path_filter} {repo_filter}
+                      AND NOT ()-[:CONTAINS]->(var)
                     RETURN DISTINCT
                         var.name as variable_name,
                         var.value as variable_value,
                         var.line_number as line_number,
                         var.context as context,
-                        COALESCE(var.path, file.path) as path,
-                        CASE 
-                            WHEN container:Function THEN 'function'
-                            WHEN container:Class THEN 'class'
-                            ELSE 'module'
-                        END as scope_type,
-                        CASE 
-                            WHEN container:Function THEN container.name
-                            WHEN container:Class THEN container.name
-                            ELSE 'module_level'
-                        END as scope_name,
+                        var.path as path,
+                        'module' as scope_type,
+                        'module_level' as scope_name,
                         var.is_dependency as is_dependency
-                    ORDER BY var.is_dependency ASC, path, line_number
-                """, variable_name=variable_name, repo_path=repo_path)
+                """, variable_name=variable_name, path=path, repo_path=repo_path)
+                instances.extend(orphaned.data())
+            except Exception:
+                pass
+
+            instances.sort(key=lambda r: (
+                r.get("is_dependency") or False,
+                r.get("path") or "",
+                r.get("line_number") or 0,
+            ))
             
             return {
                 "variable_name": variable_name,
-                "instances": variable_instances.data()
+                "instances": instances,
             }
     
     def analyze_code_relationships(self, query_type: str, target: str, context: Optional[str] = None, repo_path: Optional[str] = None) -> Dict[str, Any]:
@@ -930,7 +1070,7 @@ class CodeFinder:
                 results = self.find_module_dependencies(target, repo_path=repo_path)
                 return {
                     "query_type": "module_dependencies", "target": target, "results": results,
-                    "summary": f"Module '{target}' is imported by {len(results['imported_by_files'])} files"
+                    "summary": f"Module '{target}' is imported by {len(results['importers'])} files"
                 }
             
             elif query_type in ["variable_scope", "var_scope", "variable_usage_scope"]:
@@ -988,9 +1128,10 @@ class CodeFinder:
         """Find the most complex functions based on cyclomatic complexity."""
         with self.driver.session() as session:
             repo_filter = "AND f.path STARTS WITH $repo_path" if repo_path else ""
+            path_ignore = cypher_path_not_under_ignore_dirs("f.path")
             query = f"""
                 MATCH (f:Function)
-                WHERE f.cyclomatic_complexity IS NOT NULL AND f.is_dependency = false {repo_filter}
+                WHERE f.cyclomatic_complexity IS NOT NULL AND f.is_dependency = false {repo_filter} {path_ignore}
                 RETURN f.name as function_name, f.path as path, f.cyclomatic_complexity as complexity, f.line_number as line_number
                 ORDER BY f.cyclomatic_complexity DESC
                 LIMIT $limit
@@ -1006,4 +1147,14 @@ class CodeFinder:
                 RETURN r.name as name, r.path as path, r.is_dependency as is_dependency
                 ORDER BY r.name
             """)
-            return result.data()
+            rows = result.data()
+            bad = [r for r in rows if r.get("path") in (None, "")]
+            if bad:
+                logger.warning(
+                    "Found %s Repository record(s) with missing path in the graph; "
+                    "they are ignored when matching filesystem paths. If this persists, "
+                    "remove stale Repository nodes (e.g. Neo4j: "
+                    "MATCH (r:Repository) WHERE r.path IS NULL DETACH DELETE r) and re-index.",
+                    len(bad),
+                )
+            return rows

@@ -98,18 +98,14 @@ class TestSkipExternalResolutionBehavior:
         assert GraphBuilder is not None
 
     def test_skip_external_logic_exists_in_code(self):
-        """Test that the skip_external logic is present in graph_builder.py"""
+        """Test that the skip_external logic is present in resolution layer."""
         import inspect
-        from codegraphcontext.tools.graph_builder import GraphBuilder
-        
-        # Get source code of _create_function_calls method
-        source = inspect.getsource(GraphBuilder._create_function_calls)
-        
-        # Verify key logic is present
+        from codegraphcontext.tools.indexing.resolution import calls as calls_mod
+
+        source = inspect.getsource(calls_mod.build_function_call_groups)
+
         assert "skip_external" in source
         assert "SKIP_EXTERNAL_RESOLUTION" in source
-        assert "is_unresolved_external" in source
-        assert "if skip_external and is_unresolved_external:" in source
 
 
 class TestBackwardCompatibility:
