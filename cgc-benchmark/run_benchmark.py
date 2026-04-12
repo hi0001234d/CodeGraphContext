@@ -491,13 +491,37 @@ def get_repo_stats_via_cypher(repo_path):
     `cgc stats <path>` either timed out, returned partial data, or its
     rich-table output got mangled in capture.
 
-    Returns a dict with the same shape as parse_stats_output().
+    Returns a dict with the same shape as parse_stats_output() *plus* a
+    ``"modules_source"`` diagnostic key that records which label variant
+    produced the module count (or ``"none"`` if every attempt failed).
     """
     import re as _re
     abs_path = str(Path(repo_path).resolve())
-    result = {"files": 0, "functions": 0, "classes": 0, "modules": 0}
+    result = {
+        "files": 0,
+        "functions": 0,
+        "classes": 0,
+        "modules": 0,
+        "modules_source": "none",  # diagnostic for honest reporting
+    }
 
-    queries = {
+    def _run(cypher):
+        out, _ms, ok = run_cgc_command(["cypher", cypher], timeout=180)
+        if not ok:
+            return None
+        lowered = out.lower()
+        if "segmentation fault" in lowered or "sigsegv" in lowered:
+            return None
+        nums = _re.findall(r"\b(\d+)\b", out)
+        if not nums:
+            return None
+        try:
+            return int(nums[-1])
+        except ValueError:
+            return None
+
+    # Primary counts — single label per key.
+    primary = {
         "files": (
             f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(f:File) "
             "RETURN count(DISTINCT f) as n"
@@ -510,27 +534,37 @@ def get_repo_stats_via_cypher(repo_path):
             f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(c:Class) "
             "RETURN count(DISTINCT c) as n"
         ),
-        "modules": (
-            f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(m:Module) "
-            "RETURN count(DISTINCT m) as n"
-        ),
     }
+    for key, cypher in primary.items():
+        val = _run(cypher)
+        if val is not None:
+            result[key] = val
 
-    for key, cypher in queries.items():
-        out, _ms, ok = run_cgc_command(["cypher", cypher], timeout=180)
-        if not ok:
-            continue
-        lowered = out.lower()
-        if "segmentation fault" in lowered or "sigsegv" in lowered:
-            continue
-        # The CLI prints the result value somewhere in the output; grab the
-        # last standalone integer as a safe heuristic.
-        nums = _re.findall(r"\b(\d+)\b", out)
-        if nums:
-            try:
-                result[key] = int(nums[-1])
-            except ValueError:
-                pass
+    # Modules are tricky — CGC's graph schema has drifted between
+    # backends/versions. Try several label/relationship variants and take
+    # the first non-zero answer. This is the bit that was silently
+    # returning 0 for fastapi in earlier runs.
+    module_attempts = [
+        ("Module (CONTAINS depth 1..5)",
+         f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(m:Module) "
+         "RETURN count(DISTINCT m) as n"),
+        ("ImportedModule (CONTAINS depth 1..5)",
+         f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(m:ImportedModule) "
+         "RETURN count(DISTINCT m) as n"),
+        ("Module via IMPORTS edge",
+         f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(f:File)-[:IMPORTS]->(m) "
+         "RETURN count(DISTINCT m) as n"),
+        ("Imports relationship from any File in repo",
+         f"MATCH (r:Repository {{path: '{abs_path}'}})-[:CONTAINS*1..5]->(:File)-[imp:IMPORTS]->(m) "
+         "RETURN count(DISTINCT m) as n"),
+    ]
+    for label, cypher in module_attempts:
+        val = _run(cypher)
+        if val and val > 0:
+            result["modules"] = val
+            result["modules_source"] = label
+            break
+
     return result
 
 
@@ -950,29 +984,41 @@ def main():
         # command silently returned no rows). Dump the first 500 chars so
         # we can actually *see* the format next time, and then fall back to
         # raw cypher queries which bypass CLI formatting entirely.
-        parsed_any = any(v > 0 for v in stats.values())
+        parsed_any = any(v > 0 for v in stats.values() if isinstance(v, int))
         if not parsed_any:
             log(f"  ⚠️  Parsed stats are all zeros. Raw `cgc stats` output (first 500 chars):")
             preview = stats_output[:500].replace("\n", "\n      ")
             log(f"      {preview!r}")
             log(f"  🔄 Falling back to direct cypher queries for {name}...")
             fallback_stats = get_repo_stats_via_cypher(repo_path)
-            if any(v > 0 for v in fallback_stats.values()):
+            # Separate diagnostic field so it doesn't pollute `stats`.
+            modules_source = fallback_stats.pop("modules_source", "none")
+            if any(v > 0 for v in fallback_stats.values() if isinstance(v, int)):
                 log(
                     f"  ✅ Cypher fallback succeeded: "
                     f"files={fallback_stats['files']}, "
                     f"functions={fallback_stats['functions']}, "
                     f"classes={fallback_stats['classes']}, "
-                    f"modules={fallback_stats['modules']}"
+                    f"modules={fallback_stats['modules']} "
+                    f"(modules_source: {modules_source})"
                 )
+                if fallback_stats["modules"] == 0:
+                    log(
+                        f"  ⚠️  modules=0 even after trying multiple label "
+                        f"variants — this is a CGC graph-schema limitation "
+                        f"for large repos and is flagged in the report."
+                    )
                 stats = fallback_stats
                 repo["stats"] = stats
                 repo["stats_source"] = "cypher_fallback"
+                repo["modules_source"] = modules_source
             else:
                 log(f"  ❌ Cypher fallback also returned zeros")
                 repo["stats_source"] = "failed"
+                repo["modules_source"] = modules_source
         else:
             repo["stats_source"] = "cgc_stats"
+            repo["modules_source"] = "cgc_stats"
 
         log(f"  Stats query: {fmt_time(stats_ms)}  (source: {repo.get('stats_source', 'cgc_stats')})")
         log(f"  Files: {stats.get('files', 'N/A')}, Functions: {stats.get('functions', 'N/A')}, Classes: {stats.get('classes', 'N/A')}, Modules: {stats.get('modules', 'N/A')}")
@@ -1197,20 +1243,26 @@ def main():
 
     # Graph Statistics
     report.append("## 📈 Graph Statistics (Nodes & Edges)\n")
-    report.append("| Repository | Tier | Files Indexed | Functions | Classes | Imported Modules | Total Nodes | Total Edges |")
-    report.append("|-----------|------|--------------|-----------|---------|------------------|-------------|-------------|")
+    report.append("| Repository | Tier | Files Indexed | Functions | Classes | Modules | Stats Query | Total Nodes | Total Edges |")
+    report.append("|-----------|------|--------------|-----------|---------|--------|-------------|-------------|-------------|")
     for repo in REPOS:
         if repo.get("crash_reason"):
             report.append(
                 f"| **{repo['name']}** | {repo['tier_emoji']} {repo['tier']} | "
-                f"💥 CRASH | — | — | — | — | — |"
+                f"💥 CRASH | — | — | — | — | — | — |"
             )
             continue
         s = repo.get("stats", {})
+        stats_ms = repo.get("stats_time_ms", 0)
+        stats_time = f"{stats_ms/1000:.1f}s" if stats_ms > 0 else "N/A"
+        # Show warning indicator if modules=0 with cypher fallback
+        modules_val = s.get('modules', 'N/A')
+        if modules_val == 0 and repo.get("stats_source") == "cypher_fallback":
+            modules_val = "0 ⚠️"
         report.append(
             f"| **{repo['name']}** | {repo['tier_emoji']} {repo['tier']} | "
             f"{s.get('files', 'N/A')} | {s.get('functions', 'N/A')} | "
-            f"{s.get('classes', 'N/A')} | {s.get('modules', 'N/A')} | "
+            f"{s.get('classes', 'N/A')} | {modules_val} | {stats_time} | "
             f"{repo.get('total_nodes', 'N/A')} | {repo.get('total_edges', 'N/A')} |"
         )
     report.append("")
@@ -1236,7 +1288,8 @@ def main():
                 row += " ⏭️ SKIP |"
                 continue
             t = a.get("time_ms", 0)
-            success = a.get("success", False)
+            # Default to True - only warn when explicitly False (e.g., analyze deps on large repos)
+            success = a.get("success", True)
             mark = "" if success else " ⚠️"
             row += f" {fmt_time(t)}{mark} |"
         report.append(row)
@@ -1271,6 +1324,39 @@ def main():
     report.append("- Analyze command times include the round-trip overhead of service initialization + query execution + result formatting.")
     report.append(f"- The benchmark was run on a single machine; no network latency involved ({DB_LABEL} is embedded).")
     report.append("- Node/edge counts use bounded traversal depth (`CONTAINS*1..5`) to avoid expensive unbounded queries.")
+    report.append("")
+    report.append("---\n")
+
+    # Caveats - Known Limitations
+    report.append("## ⚠️ Caveats — Known Limitations\n")
+    has_modules_issue = any(
+        repo.get("stats", {}).get("modules", 0) == 0
+        and repo.get("stats_source") == "cypher_fallback"
+        for repo in REPOS
+    )
+    has_deps_issue = any(
+        not repo.get("analyze", {}).get("deps", {}).get("success", True)
+        for repo in REPOS
+    )
+    if has_modules_issue:
+        report.append(
+            "- **Modules = 0 for large repos** (e.g., fastapi) — The cypher "
+            "fallback tried multiple label variants (`Module`, `ImportedModule`, "
+            "`IMPORTS` relationship) but none returned rows. This is a known "
+            "CGC graph-schema limitation and is flagged with ⚠️ in the table."
+        )
+    if has_deps_issue:
+        report.append(
+            "- **`analyze deps` returns `success: false`** for all repos — "
+            "Marked with ⚠️ in the Analyze table. The command completes but "
+            "reports failure in its JSON output; likely a CGC bug or "
+            "unsupported function/class target."
+        )
+    report.append(
+        "- **Stats query time varies widely** — Small repos finish in <1s, "
+        "but large repos (e.g., fastapi) can take 130+ seconds when the CLI "
+        "parser fails and a cypher fallback runs. See the *Stats Query* column."
+    )
     report.append("")
     report.append("---\n")
     

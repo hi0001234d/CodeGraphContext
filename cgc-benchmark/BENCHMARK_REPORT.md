@@ -1,6 +1,6 @@
 # 📊 CodeGraphContext (CGC) — Benchmark Report
 
-> **Generated:** 2026-04-11 20:07:53
+> **Generated:** 2026-04-12 10:42:38 
 > **Database:** KùzuDB (single shared instance for all repos)
 
 ---
@@ -10,8 +10,8 @@
 | Parameter | Value |
 |-----------|-------|
 | **CGC Version** | 0.4.2 |
-| **CGC Git Commit** | `db5ba37937be9a336a78e35e588125971b598e56` |
-| **CGC Commit Date** | 2026-04-11 18:29:33 +0530 |
+| **CGC Git Commit** | `60c29d4ed960543723007ada6be05988498df8ee` |
+| **CGC Commit Date** | 2026-04-11 20:16:01 +0530 |
 | **Database Backend** | KùzuDB (embedded) |
 | **KùzuDB Disk Size** | 174M |
 | **OS** | Linux-6.17.0-20-generic-x86_64-with-glibc2.39 |
@@ -35,19 +35,19 @@
 
 | Repository | Tier | Total Files | Python Files | Status | Indexing Time | Files/sec |
 |-----------|------|-------------|--------------|--------|---------------|-----------|
-| **click** | 🟢 Small | 148 | 63 | ✅ OK | 8.43s | 17.6 |
-| **flask** | 🟡 Medium | 237 | 83 | ✅ OK | 10.44s | 22.7 |
-| **fastapi** | 🔴 Large | 2986 | 1121 | ✅ OK | 91.27s | 32.7 |
+| **click** | 🟢 Small | 148 | 63 | ✅ OK | 8.81s | 16.8 |
+| **flask** | 🟡 Medium | 237 | 83 | ✅ OK | 10.49s | 22.6 |
+| **fastapi** | 🔴 Large | 2986 | 1121 | ✅ OK | 91.70s | 32.6 |
 
 ---
 
 ## 📈 Graph Statistics (Nodes & Edges)
 
-| Repository | Tier | Files Indexed | Functions | Classes | Imported Modules | Total Nodes | Total Edges |
-|-----------|------|--------------|-----------|---------|------------------|-------------|-------------|
-| **click** | 🟢 Small | 63 | 2710 | 142 | 241 | 4535 | 13189 |
-| **flask** | 🟡 Medium | 83 | 3047 | 161 | 260 | 4331 | 10701 |
-| **fastapi** | 🔴 Large | 1125 | 4534 | 688 | 0 | 14667 | 25721 |
+| Repository | Tier | Files Indexed | Functions | Classes | Modules | Stats Query | Total Nodes | Total Edges |
+|-----------|------|--------------|-----------|---------|--------|-------------|-------------|-------------|
+| **click** | 🟢 Small | 63 | 2710 | 142 | 241 | 0.9s | 4535 | 13189 |
+| **flask** | 🟡 Medium | 83 | 3047 | 161 | 260 | 0.9s | 4331 | 10701 |
+| **fastapi** | 🔴 Large | 1125 | 4534 | 688 | 384 | 134.5s | 14667 | 25721 |
 
 ---
 
@@ -57,12 +57,12 @@
 
 | Analyze Command | click (🟢 Small) | flask (🟡 Medium) | fastapi (🔴 Large) |
 |----------------|------------------|------------------|------------------|
-| `analyze calls` | 771ms | 780ms | 774ms |
-| `analyze callers` | 776ms | 775ms | 791ms |
-| `analyze deps` | 1.04s | 1.03s | 1.03s |
-| `analyze tree` | 789ms | 796ms | 787ms |
-| `analyze complexity` | 755ms | 771ms | 774ms |
-| `analyze dead-code` | 838ms | 848ms | 838ms |
+| `analyze calls` | 786ms | 791ms | 789ms |
+| `analyze callers` | 791ms | 825ms | 791ms |
+| `analyze deps` | 1.05s ⚠️ | 1.05s ⚠️ | 1.03s ⚠️ |
+| `analyze tree` | 825ms | 800ms | 818ms |
+| `analyze complexity` | 778ms | 810ms | 771ms |
+| `analyze dead-code` | 843ms | 869ms | 853ms |
 
 ### Test Parameters Used
 
@@ -99,9 +99,16 @@
 
 ---
 
+## ⚠️ Caveats — Known Limitations
+
+- **`analyze deps` returns `success: false`** for all repos — Marked with ⚠️ in the Analyze table. The command completes but reports failure in its JSON output; likely a CGC bug or unsupported function/class target.
+- **Stats query time varies widely** — Small repos finish in <1s, but large repos (e.g., fastapi) can take 130+ seconds when the CLI parser fails and a cypher fallback runs. See the *Stats Query* column.
+
+---
+
 ## 🔗 References
 
-- **CodeGraphContext**: [GitHub](https://github.com/Shashankss1205/CodeGraphContext) — Commit `db5ba37937be`
+- **CodeGraphContext**: [GitHub](https://github.com/Shashankss1205/CodeGraphContext) — Commit `60c29d4ed960`
 - **pallets/click**: [GitHub](https://github.com/pallets/click) — Commit `04ef3a6f473d`
 - **pallets/flask**: [GitHub](https://github.com/pallets/flask) — Commit `2ac89889f4cc`
 - **tiangolo/fastapi**: [GitHub](https://github.com/tiangolo/fastapi) — Commit `eba8942c81db`
